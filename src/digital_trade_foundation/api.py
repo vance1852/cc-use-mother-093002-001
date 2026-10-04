@@ -9,8 +9,13 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .errors import DomainError, ValidationError
+from .scheduling import MeetingService
 from .service import DomainService
 from .storage import Database
+
+
+def _receipt_response(receipt) -> tuple[int, dict[str, Any]]:
+    return (200 if receipt.replayed else 201), receipt.__dict__
 
 
 def route(service: DomainService, method: str, path: str, body: dict[str, Any] | None,
@@ -21,22 +26,19 @@ def route(service: DomainService, method: str, path: str, body: dict[str, Any] |
     body = body or {}
     parsed = urlparse(path)
     actor_id = headers.get("X-Actor-Id", "")
+    segments = [part for part in parsed.path.split("/") if part]
     try:
         if method == "GET" and parsed.path == "/health":
             valid, count = service.verify_audit()
             return 200, {"status": "ok", "audit_valid": valid, "audit_events": count}
         if method == "POST" and parsed.path == "/organizations":
-            receipt = service.register_organization(actor_id=actor_id, **body)
-            return 200 if receipt.replayed else 201, receipt.__dict__
+            return _receipt_response(service.register_organization(actor_id=actor_id, **body))
         if method == "POST" and parsed.path == "/actors":
-            receipt = service.register_actor(actor_id=actor_id, **body)
-            return 200 if receipt.replayed else 201, receipt.__dict__
+            return _receipt_response(service.register_actor(actor_id=actor_id, **body))
         if method == "POST" and parsed.path == "/sites":
-            receipt = service.register_site(actor_id=actor_id, **body)
-            return 200 if receipt.replayed else 201, receipt.__dict__
+            return _receipt_response(service.register_site(actor_id=actor_id, **body))
         if method == "POST" and parsed.path == "/domain-records":
-            receipt = service.record_domain_data(actor_id=actor_id, **body)
-            return 200 if receipt.replayed else 201, receipt.__dict__
+            return _receipt_response(service.record_domain_data(actor_id=actor_id, **body))
         if method == "GET" and parsed.path == "/domain-records":
             query = parse_qs(parsed.query)
             site_id = query.get("site_id", [""])[0]
@@ -48,6 +50,65 @@ def route(service: DomainService, method: str, path: str, body: dict[str, Any] |
             query = parse_qs(parsed.query)
             after = int(query.get("after_sequence", ["0"])[0])
             return 200, {"items": service.audit_events(after)}
+        # ---- 会谈编排接口 ----
+        if method == "POST" and segments == ["delegations"]:
+            return _receipt_response(service.register_delegation(actor_id=actor_id, **body))
+        if method == "POST" and segments == ["delegates"]:
+            return _receipt_response(service.register_delegate(actor_id=actor_id, **body))
+        if method == "POST" and segments == ["delegate-replacements"]:
+            return _receipt_response(service.replace_delegate(actor_id=actor_id, **body))
+        if method == "POST" and segments == ["rooms"]:
+            return _receipt_response(service.register_room(actor_id=actor_id, **body))
+        if method == "POST" and segments == ["interpreters"]:
+            return _receipt_response(service.register_interpreter(actor_id=actor_id, **body))
+        if method == "POST" and segments == ["recusals"]:
+            return _receipt_response(service.register_recusal(actor_id=actor_id, **body))
+        if method == "POST" and segments == ["sessions"]:
+            return _receipt_response(service.create_session(actor_id=actor_id, **body))
+        if method == "POST" and segments == ["materials"]:
+            return _receipt_response(service.add_material(actor_id=actor_id, **body))
+        if method == "POST" and segments == ["maintenance", "sweep"]:
+            return 200, service.sweep(actor_id=actor_id)
+        if method == "GET" and segments == ["me", "invitations"]:
+            return 200, {"items": service.my_invitations(actor_id=actor_id)}
+        if method == "GET" and segments == ["me", "assignments"]:
+            return 200, {"items": service.my_assignments(actor_id=actor_id)}
+        if len(segments) == 3 and segments[0] == "sessions" and method == "POST":
+            action = segments[2]
+            if action == "publish":
+                return _receipt_response(service.publish_session(actor_id=actor_id, session_id=segments[1], **body))
+            if action == "reschedule":
+                return _receipt_response(service.reschedule_session(actor_id=actor_id, session_id=segments[1], **body))
+            if action == "cancel":
+                return _receipt_response(service.cancel_session(actor_id=actor_id, session_id=segments[1], **body))
+            if action == "complete":
+                return _receipt_response(service.complete_session(actor_id=actor_id, session_id=segments[1], **body))
+            if action == "interpreters":
+                return _receipt_response(service.assign_interpreter(actor_id=actor_id, session_id=segments[1], **body))
+            if action == "observers":
+                return _receipt_response(service.assign_observer(actor_id=actor_id, session_id=segments[1], **body))
+            if action == "invitations":
+                return _receipt_response(service.invite_delegate(actor_id=actor_id, session_id=segments[1], **body))
+            if action == "checkins":
+                return _receipt_response(service.check_in(actor_id=actor_id, session_id=segments[1], **body))
+        if len(segments) == 3 and segments[0] == "invitations" and method == "POST":
+            action = segments[2]
+            if action == "respond":
+                return _receipt_response(service.respond_invitation(actor_id=actor_id, invitation_id=segments[1], **body))
+            if action == "delegate":
+                return _receipt_response(service.delegate_invitation(actor_id=actor_id, invitation_id=segments[1], **body))
+            if action == "withdraw":
+                return _receipt_response(service.withdraw_invitation(actor_id=actor_id, invitation_id=segments[1], **body))
+        if len(segments) == 3 and segments[0] == "materials" and segments[2] == "access" and method == "POST":
+            return _receipt_response(service.access_material(actor_id=actor_id, material_id=segments[1], **body))
+        if len(segments) == 2 and segments[0] == "sessions" and method == "GET":
+            return 200, service.get_session_view(actor_id=actor_id, session_id=segments[1])
+        if len(segments) == 3 and segments[0] == "sessions" and segments[2] == "trace" and method == "GET":
+            return 200, service.trace_session(actor_id=actor_id, session_id=segments[1])
+        if len(segments) == 3 and segments[0] == "sessions" and segments[2] == "rejections" and method == "GET":
+            return 200, {"items": service.list_rejections(actor_id=actor_id, session_id=segments[1])}
+        if len(segments) == 3 and segments[0] == "delegates" and segments[2] == "rejections" and method == "GET":
+            return 200, {"items": service.list_rejections(actor_id=actor_id, delegate_id=segments[1])}
         return 404, {"error": "route_not_found", "message": "接口不存在"}
     except DomainError as exc:
         return exc.status, {"error": exc.code, "message": str(exc)}
@@ -93,13 +154,13 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> int:
     """启动本地 HTTP 服务。"""
 
-    parser = argparse.ArgumentParser(description="启动技能赛训协作基础服务")
+    parser = argparse.ArgumentParser(description="启动国际活动会谈编排服务")
     parser.add_argument("--database", default="service.sqlite3")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
     database = Database(args.database)
-    Handler.service = DomainService(database)
+    Handler.service = MeetingService(database)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     try:
         server.serve_forever()
